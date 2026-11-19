@@ -1,7 +1,7 @@
 
 const db = require("../db");
 
-// Save an order and its items in one database transaction
+// SAVE ORDER AND ORDER ITEMS
 function insertOrder(order, items) {
   return new Promise((resolve, reject) => {
     db.getConnection((connectionError, connection) => {
@@ -17,12 +17,13 @@ function insertOrder(order, items) {
 
         const orderSql = `
           INSERT INTO orders
-          (customer_name, institution_id, role, phone,
+          (user_id, customer_name, institution_id, role, phone,
            location, location_details, pickup_time, total_price)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
 
         const orderValues = [
+          order.user_id,
           order.customer_name,
           order.institution_id || null,
           order.role,
@@ -163,6 +164,7 @@ async function createOrder(req, res) {
 
     const orderId = await insertOrder(
       {
+        user_id: req.user.id,
         customer_name: customer_name.trim(),
         institution_id,
         role,
@@ -191,4 +193,113 @@ async function createOrder(req, res) {
   }
 }
 
-module.exports = { createOrder };
+// GET MY ORDER STATUS API
+async function getMyOrder(req, res) {
+  try {
+    const orderId = Number(req.params.id);
+    const userId = req.user.id;
+
+    if (!Number.isInteger(orderId) || orderId < 1) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid order ID.",
+      });
+    }
+
+    const [orders] = await db.promise().query(
+      `SELECT id, status, total_price, created_at, pickup_time
+       FROM orders
+       WHERE id = ? AND user_id = ?`,
+      [orderId, userId]
+    );
+
+    if (orders.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      order: orders[0],
+    });
+  } catch (error) {
+    console.error("Order tracking failed:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Could not fetch order status.",
+    });
+  }
+}
+
+// GET ALL MY ORDERS (ORDER HISTORY)
+async function getMyOrders(req, res) {
+  try {
+    const userId = req.user.id;
+
+    const [rows] = await db.promise().query(
+      `SELECT
+          o.id AS order_id,
+          o.status,
+          o.total_price,
+          o.created_at,
+          o.pickup_time,
+          oi.food_id,
+          f.name AS food_name,
+          oi.quantity,
+          oi.price AS item_price,
+          oi.subtotal
+       FROM orders o
+       LEFT JOIN order_items oi ON o.id = oi.order_id
+       LEFT JOIN foods f ON oi.food_id = f.id
+       WHERE o.user_id = ?
+       ORDER BY o.created_at DESC, o.id DESC`,
+      [userId]
+    );
+
+    const orderMap = new Map();
+
+    rows.forEach((row) => {
+      if (!orderMap.has(row.order_id)) {
+        orderMap.set(row.order_id, {
+          id: row.order_id,
+          status: row.status,
+          total_price: row.total_price,
+          created_at: row.created_at,
+          pickup_time: row.pickup_time,
+          items: [],
+        });
+      }
+
+      if (row.food_id !== null) {
+        orderMap.get(row.order_id).items.push({
+          food_id: row.food_id,
+          food_name: row.food_name || "Unavailable food",
+          quantity: row.quantity,
+          price: row.item_price,
+          subtotal: row.subtotal,
+        });
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      orders: Array.from(orderMap.values()),
+    });
+  } catch (error) {
+    console.error("Order history failed:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Could not fetch order history.",
+    });
+  }
+}
+
+module.exports = {
+  createOrder,
+  getMyOrder,
+  getMyOrders,
+};
